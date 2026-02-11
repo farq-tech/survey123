@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: survey123-webhook
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: logs-2m50
+          property: connectionString
