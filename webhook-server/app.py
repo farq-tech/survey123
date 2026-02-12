@@ -2,7 +2,8 @@ import os
 import json
 import logging
 from datetime import datetime, timezone
-from flask import Flask, request, jsonify
+from html import escape as _esc
+from flask import Flask, request, jsonify, make_response
 from flask_cors import CORS
 import psycopg2
 from psycopg2.extras import Json
@@ -283,6 +284,62 @@ def _get_attachment_counts():
         return None, None
 
 
+def _get_attachment_details():
+    """Get detailed attachment info including per-keyword breakdown."""
+    token = _get_arcgis_token()
+    result = {"total_photos": 0, "total_videos": 0, "by_keyword": {},
+              "pois_with_photos": 0, "pois_with_videos": 0,
+              "total_pois_queried": 0}
+    if not token:
+        return result
+    try:
+        r = http_requests.get(
+            f"{ARCGIS_SERVICE_URL}/query",
+            params={
+                "where": "agent_name IS NOT NULL AND agent_name <> ''",
+                "returnIdsOnly": "true",
+                "f": "json",
+                "token": token,
+            },
+            timeout=30,
+        )
+        object_ids = r.json().get("objectIds", [])
+        if not object_ids:
+            return result
+        result["total_pois_queried"] = len(object_ids)
+        for i in range(0, len(object_ids), 100):
+            batch = object_ids[i:i + 100]
+            r2 = http_requests.get(
+                f"{ARCGIS_SERVICE_URL}/queryAttachments",
+                params={"objectIds": ",".join(str(o) for o in batch),
+                        "f": "json", "token": token},
+                timeout=30,
+            )
+            data = r2.json()
+            if "error" in data:
+                break
+            for group in data.get("attachmentGroups", []):
+                has_photo = has_video = False
+                for att in group.get("attachmentInfos", []):
+                    ct = (att.get("contentType") or "").lower()
+                    kw = att.get("keywords") or "other"
+                    result["by_keyword"][kw] = result["by_keyword"].get(kw, 0) + 1
+                    if ct.startswith("image/"):
+                        result["total_photos"] += 1
+                        has_photo = True
+                    elif ct.startswith("video/"):
+                        result["total_videos"] += 1
+                        has_video = True
+                if has_photo:
+                    result["pois_with_photos"] += 1
+                if has_video:
+                    result["pois_with_videos"] += 1
+        return result
+    except Exception as e:
+        logger.warning("Attachment details error: %s", e)
+        return result
+
+
 def _count_attr(rows, key):
     """Count non-empty values for a given attribute key across all rows."""
     count = 0
@@ -340,6 +397,59 @@ STATUS_LABELS = {
     "coming_soon": "Coming Soon",
     "relocated": "Relocated",
 }
+
+PHOTO_TYPE_LABELS = {
+    "entrance_photo": "Entrance",
+    "license_photo": "License",
+    "business_exterior": "Exterior (Primary)",
+    "exterior_photo_2": "Exterior (Secondary)",
+    "business_interior": "Interior (Primary)",
+    "interior_photo_2": "Interior (Secondary)",
+    "menu_photo_1": "Menu Photo 1",
+    "menu_photo_2": "Menu Photo 2",
+    "menu_photo_3": "Menu Photo 3",
+    "additional_photo": "Additional",
+    "interior_walkthrough_video": "Video (Walkthrough)",
+}
+
+REPORT_CSS = """
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Segoe UI',-apple-system,BlinkMacSystemFont,Roboto,sans-serif;
+color:#333;line-height:1.6;padding:40px;max-width:1100px;margin:0 auto;background:#fff}
+.report-header{text-align:center;padding:48px 0 32px;border-bottom:3px solid #31872e;margin-bottom:40px}
+.report-header h1{font-size:32px;color:#31872e;margin-bottom:4px}
+.report-header .subtitle{font-size:18px;color:#178783;margin-bottom:8px}
+.report-header p{color:#666;font-size:14px}
+.kpi-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:16px;margin-bottom:48px}
+.kpi-card{background:#f8f9fa;border-left:4px solid #31872e;padding:20px;border-radius:0 8px 8px 0}
+.kpi-card .value{font-size:36px;font-weight:700;color:#31872e;line-height:1.2}
+.kpi-card .label{font-size:12px;color:#666;text-transform:uppercase;letter-spacing:.5px;margin-top:4px}
+.section{margin-bottom:48px;page-break-inside:avoid}
+.section h2{font-size:22px;color:#31872e;border-bottom:2px solid #e0e0e0;padding-bottom:8px;margin-bottom:20px}
+.section h3{font-size:16px;color:#333;margin:16px 0 12px}
+table{width:100%;border-collapse:collapse;margin-bottom:20px;font-size:14px}
+th{background:#31872e;color:#fff;text-align:left;padding:10px 14px;font-size:12px;
+text-transform:uppercase;letter-spacing:.5px;font-weight:600}
+td{padding:10px 14px;border-bottom:1px solid #e0e0e0}
+tr:nth-child(even){background:#fafafa}
+.bar-row{display:flex;align-items:center;gap:12px;margin:6px 0}
+.bar-label{min-width:180px;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.bar-track{flex:1;background:#e8e8e8;border-radius:4px;height:22px;overflow:hidden}
+.bar-fill{height:100%;border-radius:4px;background:#31872e;min-width:2px}
+.bar-value{min-width:60px;text-align:right;font-weight:600;font-size:14px;color:#333}
+.badge{display:inline-block;padding:2px 10px;border-radius:12px;font-size:12px;font-weight:600}
+.badge-high{background:#d4edda;color:#155724}
+.badge-medium{background:#fff3cd;color:#856404}
+.badge-low{background:#f8d7da;color:#721c24}
+.two-col{display:grid;grid-template-columns:1fr 1fr;gap:32px}
+.metric-row{display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid #e0e0e0}
+.metric-row .label{color:#666}
+.metric-row .value{font-weight:600}
+.footer{text-align:center;padding:32px 0;border-top:2px solid #e0e0e0;color:#666;font-size:13px;margin-top:48px}
+@media print{body{padding:20px}.section{page-break-inside:avoid}}
+@media(max-width:768px){.two-col{grid-template-columns:1fr}.kpi-grid{grid-template-columns:repeat(2,1fr)}
+body{padding:16px}.bar-label{min-width:120px}}
+"""
 
 
 @app.route("/report", methods=["GET"])
@@ -671,6 +781,470 @@ def report():
 
     except Exception as e:
         logger.error("Report error: %s", str(e), exc_info=True)
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.route("/client-report", methods=["GET"])
+def client_report():
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT attributes, agent_name, submitted_at
+                    FROM survey_submissions
+                    ORDER BY submitted_at
+                """)
+                columns = [desc[0] for desc in cur.description]
+                raw_rows = [dict(zip(columns, row)) for row in cur.fetchall()]
+
+        all_attrs = [r.get("attributes") or {} for r in raw_rows]
+        total_pois = len(raw_rows)
+        esc = _esc
+
+        # --- Attachment details ---
+        att = _get_attachment_details()
+        total_photos = att["total_photos"]
+        total_videos = att["total_videos"]
+        pois_w_photos = att["pois_with_photos"]
+        att_total_pois = att["total_pois_queried"]
+        by_keyword = att["by_keyword"]
+
+        # --- Distributions ---
+        agent_dist = _distribution(all_attrs, "agent_name")
+        category_dist = _distribution(all_attrs, "category", CATEGORY_LABELS)
+        subcategory_dist = _distribution(all_attrs, "secondary_category")
+        status_dist = _distribution(all_attrs, "company_status", STATUS_LABELS)
+
+        phone_count = _count_attr(all_attrs, "phone_number")
+        website_count = _count_attr(all_attrs, "website")
+        social_count = _count_attr(all_attrs, "social_media")
+        name_ar_count = _count_attr(all_attrs, "name_ar")
+        name_en_count = _count_attr(all_attrs, "name_en")
+        identity_correct_dist = _distribution(all_attrs, "identity_correct")
+        license_count = _count_attr(all_attrs, "commercial_license_number")
+
+        working_days_dist = _distribution(all_attrs, "working_days")
+        working_hours_dist = _distribution(all_attrs, "working_hours_each_day")
+        break_time_dist = _distribution(all_attrs, "break_time_each_day")
+
+        language_dist = {}
+        for a in all_attrs:
+            lv = a.get("language", "")
+            if lv:
+                for lang in str(lv).split(","):
+                    lang = lang.strip()
+                    if lang:
+                        language_dist[lang] = language_dist.get(lang, 0) + 1
+        language_dist = dict(sorted(language_dist.items(), key=lambda x: -x[1]))
+
+        payment_dist = {}
+        for a in all_attrs:
+            pv = a.get("accepted_payment_methods", "")
+            if pv:
+                for p in str(pv).split(","):
+                    p = p.strip()
+                    if p:
+                        payment_dist[p] = payment_dist.get(p, 0) + 1
+        payment_dist = dict(sorted(payment_dist.items(), key=lambda x: -x[1]))
+
+        cuisine_dist = {}
+        for a in all_attrs:
+            cv = a.get("cuisine", "")
+            if cv:
+                for c in str(cv).split(","):
+                    c = c.strip()
+                    if c:
+                        cuisine_dist[c] = cuisine_dist.get(c, 0) + 1
+        cuisine_dist = dict(sorted(cuisine_dist.items(), key=lambda x: -x[1]))
+
+        parking_dist = _distribution(all_attrs, "has_parking_lot")
+        valet_dist = _distribution(all_attrs, "valet_parking")
+        drive_thru_dist = _distribution(all_attrs, "drive_thru")
+        wheelchair_dist = _distribution(all_attrs, "is_wheelchair_accessible")
+        wifi_dist = _distribution(all_attrs, "wifi")
+
+        dine_in_dist = _distribution(all_attrs, "dine_in")
+        delivery_dist = _distribution(all_attrs, "only_delivery")
+        family_dist = _distribution(all_attrs, "has_family_seating")
+        large_groups_dist = _distribution(all_attrs, "large_groups_can_be_seated")
+        order_car_dist = _distribution(all_attrs, "order_from_car")
+
+        music_dist = _distribution(all_attrs, "music")
+        children_dist = _distribution(all_attrs, "children_area")
+        shisha_dist = _distribution(all_attrs, "shisha")
+
+        physical_menu_dist = _distribution(all_attrs, "has_physical_menu")
+        digital_menu_dist = _distribution(all_attrs, "has_digital_menu")
+
+        location_correct_dist = _distribution(all_attrs, "location_correct")
+        coords_count = sum(1 for a in all_attrs
+                           if (a.get("latitude") or a.get("corrected_lat"))
+                           and (a.get("longitude") or a.get("corrected_lon")))
+
+        building_dist = _distribution(all_attrs, "building_number")
+        floor_dist = _distribution(all_attrs, "floor_number")
+
+        smoking_dist = _distribution(all_attrs, "has_smoking_area")
+        waiting_dist = _distribution(all_attrs, "has_a_waiting_area")
+        reservation_dist = _distribution(all_attrs, "reservation")
+        prayer_dist = _distribution(all_attrs, "has_women_only_prayer_room")
+        pickup_dist = _distribution(all_attrs, "pickup_point_exists")
+
+        iftar_dist = _distribution(all_attrs, "offers_iftar_menu")
+        suhoor_dist = _distribution(all_attrs, "is_open_during_suhoor")
+
+        notes_count = _count_attr(all_attrs, "general_notes")
+
+        # --- Date range ---
+        dates = [r.get("submitted_at") for r in raw_rows if r.get("submitted_at")]
+        date_range = ""
+        if dates:
+            date_range = (f"{min(dates).strftime('%b %d, %Y')} - "
+                          f"{max(dates).strftime('%b %d, %Y')}")
+
+        # --- Data quality ---
+        quality_fields = [
+            ("Arabic Name", "name_ar"), ("English Name", "name_en"),
+            ("Category", "category"), ("Subcategory", "secondary_category"),
+            ("Status", "company_status"), ("Phone Number", "phone_number"),
+            ("Website", "website"), ("Working Days", "working_days"),
+            ("Working Hours", "working_hours_each_day"),
+            ("Identity Verified", "identity_correct"),
+        ]
+        quality_data = []
+        total_filled = 0
+        for label, field in quality_fields:
+            cnt = _count_attr(all_attrs, field)
+            rate = cnt / total_pois * 100 if total_pois > 0 else 0
+            quality_data.append((label, cnt, rate))
+            total_filled += cnt
+        total_possible = len(quality_fields) * total_pois
+        overall_quality = total_filled / total_possible * 100 if total_possible > 0 else 0
+
+        num_agents = len(agent_dist)
+        photo_coverage = (pois_w_photos / att_total_pois * 100
+                          if att_total_pois > 0 else 0)
+        avg_photos = total_photos / att_total_pois if att_total_pois > 0 else 0
+
+        # --- HTML helpers ---
+        def bar_chart(dist):
+            if not dist:
+                return '<p style="color:#999;font-style:italic">No data</p>'
+            mx = max(dist.values())
+            rows = []
+            for lbl, val in dist.items():
+                pct = val / mx * 100 if mx > 0 else 0
+                rows.append(
+                    f'<div class="bar-row">'
+                    f'<span class="bar-label">{esc(str(lbl))}</span>'
+                    f'<div class="bar-track">'
+                    f'<div class="bar-fill" style="width:{pct:.0f}%"></div></div>'
+                    f'<span class="bar-value">{val}</span></div>')
+            return "\n".join(rows)
+
+        def badge(pct):
+            cls = ("badge-high" if pct >= 70 else
+                   "badge-medium" if pct >= 40 else "badge-low")
+            return f'<span class="badge {cls}">{pct:.0f}%</span>'
+
+        def yn(dist):
+            y = dist.get("yes", 0)
+            t = y + dist.get("no", 0)
+            if t == 0:
+                return ""
+            return f'{y} of {t} ({y / t * 100:.0f}%)'
+
+        def metric(label, val, total=None):
+            b = ""
+            if total and total > 0:
+                b = " " + badge(val / total * 100)
+            return (f'<div class="metric-row">'
+                    f'<span class="label">{esc(label)}</span>'
+                    f'<span class="value">{val}{b}</span></div>')
+
+        # --- Build HTML ---
+        now_str = datetime.now(timezone.utc).strftime("%B %d, %Y at %H:%M UTC")
+
+        # Header
+        header = (
+            f'<div class="report-header">'
+            f'<h1>POI Field Survey Report</h1>'
+            f'<div class="subtitle">Comprehensive Field Data Analysis</div>'
+            f'<p>Generated on {now_str}'
+            f'{f" | Survey Period: {date_range}" if date_range else ""}</p>'
+            f'</div>')
+
+        # KPI cards
+        kpis = (
+            f'<div class="kpi-grid">'
+            f'<div class="kpi-card"><div class="value">{total_pois}</div>'
+            f'<div class="label">Total POIs</div></div>'
+            f'<div class="kpi-card"><div class="value">{total_photos}</div>'
+            f'<div class="label">Photos Taken</div></div>'
+            f'<div class="kpi-card"><div class="value">{total_videos}</div>'
+            f'<div class="label">Videos Taken</div></div>'
+            f'<div class="kpi-card"><div class="value">{num_agents}</div>'
+            f'<div class="label">Field Agents</div></div>'
+            f'<div class="kpi-card"><div class="value">{overall_quality:.0f}%</div>'
+            f'<div class="label">Data Quality</div></div>'
+            f'<div class="kpi-card"><div class="value">{photo_coverage:.0f}%</div>'
+            f'<div class="label">Photo Coverage</div></div>'
+            f'</div>')
+
+        # Agent table
+        agent_rows = ""
+        for ag, cnt in agent_dist.items():
+            pct = cnt / total_pois * 100 if total_pois > 0 else 0
+            agent_rows += (f'<tr><td>{esc(str(ag))}</td>'
+                           f'<td>{cnt}</td><td>{pct:.1f}%</td></tr>')
+        agents_sec = (
+            f'<section class="section"><h2>1. Agent Performance</h2>'
+            f'<table><tr><th>Agent Name</th><th>Submissions</th>'
+            f'<th>Share</th></tr>{agent_rows}</table></section>')
+
+        # Category
+        category_sec = (
+            f'<section class="section">'
+            f'<h2>2. POI Category Analysis</h2>'
+            f'<div class="two-col"><div>'
+            f'<h3>By Category ({len(category_dist)})</h3>'
+            f'{bar_chart(category_dist)}</div><div>'
+            f'<h3>By Subcategory ({len(subcategory_dist)})</h3>'
+            f'{bar_chart(subcategory_dist)}</div></div></section>')
+
+        # Status
+        status_sec = (
+            f'<section class="section"><h2>3. Business Status</h2>'
+            f'{bar_chart(status_dist)}</section>' if status_dist else "")
+
+        # Identity & Contact
+        id_yes = identity_correct_dist.get("yes", 0)
+        id_total = sum(identity_correct_dist.values()) if identity_correct_dist else 0
+        identity_sec = (
+            f'<section class="section">'
+            f'<h2>4. Identity & Contact Coverage</h2>'
+            f'<div class="two-col"><div>'
+            f'<h3>Identity</h3>'
+            f'{metric("Arabic Names", name_ar_count, total_pois)}'
+            f'{metric("English Names", name_en_count, total_pois)}'
+            f'{metric("Identity Verified", id_yes, id_total)}'
+            f'{metric("Licenses Collected", license_count)}'
+            f'</div><div>'
+            f'<h3>Contact Info</h3>'
+            f'{metric("Phone Numbers", phone_count, total_pois)}'
+            f'{metric("Websites", website_count, total_pois)}'
+            f'{metric("Social Media", social_count, total_pois)}'
+            f'</div></div></section>')
+
+        # Location
+        loc_yes = location_correct_dist.get("yes", 0)
+        loc_total = sum(location_correct_dist.values()) if location_correct_dist else 0
+        location_sec = ""
+        if loc_total > 0 or coords_count > 0:
+            location_sec = (
+                f'<section class="section">'
+                f'<h2>5. Location & Coordinates</h2>'
+                f'{metric("Location Verified Correct", loc_yes, loc_total)}'
+                f'{metric("Coordinates Collected", coords_count)}'
+                f'</section>')
+
+        # Building
+        building_sec = ""
+        if building_dist or floor_dist:
+            building_sec = (
+                f'<section class="section">'
+                f'<h2>6. Building & Floor</h2>'
+                f'<div class="two-col"><div>'
+                f'<h3>Building Number</h3>{bar_chart(building_dist)}'
+                f'</div><div>'
+                f'<h3>Floor</h3>{bar_chart(floor_dist)}'
+                f'</div></div></section>')
+
+        # Working Hours
+        hours_sec = ""
+        if working_days_dist or working_hours_dist:
+            hours_sec = (
+                f'<section class="section">'
+                f'<h2>7. Working Hours Patterns</h2>'
+                f'<div class="two-col"><div>'
+                f'<h3>Working Days</h3>{bar_chart(working_days_dist)}'
+                f'</div><div>'
+                f'<h3>Daily Hours</h3>{bar_chart(working_hours_dist)}'
+                f'</div></div>'
+                f'<h3>Break Times</h3>{bar_chart(break_time_dist)}'
+                f'</section>')
+
+        # Language
+        language_sec = ""
+        if language_dist:
+            language_sec = (
+                f'<section class="section">'
+                f'<h2>8. Languages Spoken</h2>'
+                f'{bar_chart(language_dist)}</section>')
+
+        # Payment
+        payment_sec = ""
+        if payment_dist:
+            payment_sec = (
+                f'<section class="section">'
+                f'<h2>9. Payment Methods</h2>'
+                f'{bar_chart(payment_dist)}</section>')
+
+        # Restaurant & F&B
+        restaurant_sec = ""
+        if cuisine_dist or physical_menu_dist or dine_in_dist:
+            menu_metrics = ""
+            if physical_menu_dist:
+                menu_metrics += metric("Has Physical Menu", yn(physical_menu_dist))
+            if digital_menu_dist:
+                menu_metrics += metric("Has Digital Menu / QR", yn(digital_menu_dist))
+
+            seating = ""
+            for lbl, d in [("Dine-in", dine_in_dist),
+                           ("Family Seating", family_dist),
+                           ("Large Groups", large_groups_dist),
+                           ("Delivery Only", delivery_dist),
+                           ("Order from Car", order_car_dist)]:
+                s = yn(d)
+                if s:
+                    seating += metric(lbl, s)
+
+            restaurant_sec = (
+                f'<section class="section">'
+                f'<h2>10. Restaurant & F&B Analysis</h2>'
+                f'<div class="two-col"><div>'
+                f'<h3>Cuisine Types ({len(cuisine_dist)})</h3>'
+                f'{bar_chart(cuisine_dist)}</div><div>'
+                f'<h3>Menu Availability</h3>{menu_metrics}'
+                f'<h3>Seating & Service</h3>{seating}'
+                f'</div></div></section>')
+
+        # Facilities
+        facility_parts_left = ""
+        for lbl, d in [("Has Parking", parking_dist),
+                       ("Valet Parking", valet_dist),
+                       ("Drive-Thru", drive_thru_dist)]:
+            s = yn(d)
+            if s:
+                facility_parts_left += metric(lbl, s)
+        for lbl, d in [("Wheelchair Accessible", wheelchair_dist),
+                       ("WiFi Available", wifi_dist)]:
+            s = yn(d)
+            if s:
+                facility_parts_left += metric(lbl, s)
+
+        facility_parts_right = ""
+        for lbl, d in [("Music", music_dist),
+                       ("Children Area", children_dist),
+                       ("Shisha", shisha_dist),
+                       ("Smoking Area", smoking_dist),
+                       ("Waiting Area", waiting_dist),
+                       ("Reservations", reservation_dist),
+                       ("Women Prayer Room", prayer_dist),
+                       ("Pickup Point", pickup_dist)]:
+            s = yn(d)
+            if s:
+                facility_parts_right += metric(lbl, s)
+
+        facilities_sec = ""
+        if facility_parts_left or facility_parts_right:
+            facilities_sec = (
+                f'<section class="section">'
+                f'<h2>11. Facilities & Amenities</h2>'
+                f'<div class="two-col"><div>'
+                f'<h3>Parking, Access & Connectivity</h3>'
+                f'{facility_parts_left}</div><div>'
+                f'<h3>Entertainment & Services</h3>'
+                f'{facility_parts_right}</div></div></section>')
+
+        # Ramadan
+        ramadan_sec = ""
+        if iftar_dist or suhoor_dist:
+            rm = ""
+            if iftar_dist:
+                rm += metric("Offers Iftar Menu", yn(iftar_dist))
+            if suhoor_dist:
+                rm += metric("Open During Suhoor", yn(suhoor_dist))
+            ramadan_sec = (
+                f'<section class="section">'
+                f'<h2>12. Ramadan Services</h2>{rm}</section>')
+
+        # Media documentation
+        photo_type_rows = ""
+        for kw, cnt in sorted(by_keyword.items(), key=lambda x: -x[1]):
+            lbl = PHOTO_TYPE_LABELS.get(kw, kw.replace("_", " ").title())
+            photo_type_rows += f'<tr><td>{esc(lbl)}</td><td>{cnt}</td></tr>'
+
+        media_sec = (
+            f'<section class="section">'
+            f'<h2>13. Media Documentation</h2>'
+            f'<div class="kpi-grid" style="margin-bottom:24px">'
+            f'<div class="kpi-card"><div class="value">{total_photos}</div>'
+            f'<div class="label">Total Photos</div></div>'
+            f'<div class="kpi-card"><div class="value">{total_videos}</div>'
+            f'<div class="label">Total Videos</div></div>'
+            f'<div class="kpi-card"><div class="value">{photo_coverage:.0f}%</div>'
+            f'<div class="label">POIs with Photos</div></div>'
+            f'<div class="kpi-card"><div class="value">{avg_photos:.1f}</div>'
+            f'<div class="label">Avg Photos / POI</div></div></div>'
+            f'<h3>Breakdown by Type</h3>'
+            f'<table><tr><th>Attachment Type</th><th>Count</th></tr>'
+            f'{photo_type_rows}</table></section>')
+
+        # Data quality
+        quality_rows = ""
+        for lbl, cnt, rate in quality_data:
+            quality_rows += (f'<tr><td>{esc(lbl)}</td>'
+                             f'<td>{cnt} / {total_pois}</td>'
+                             f'<td>{badge(rate)}</td></tr>')
+        quality_sec = (
+            f'<section class="section">'
+            f'<h2>14. Data Quality Assessment</h2>'
+            f'<div class="kpi-grid" style="margin-bottom:24px">'
+            f'<div class="kpi-card"><div class="value">{overall_quality:.0f}%</div>'
+            f'<div class="label">Overall Quality Score</div></div>'
+            f'<div class="kpi-card"><div class="value">{total_pois}</div>'
+            f'<div class="label">POIs in Database</div></div>'
+            f'<div class="kpi-card"><div class="value">{att_total_pois}</div>'
+            f'<div class="label">POIs on Service</div></div></div>'
+            f'<table><tr><th>Field</th><th>Collected</th>'
+            f'<th>Completion Rate</th></tr>{quality_rows}</table></section>')
+
+        # Notes
+        notes_sec = ""
+        if notes_count > 0:
+            notes_sec = (
+                f'<section class="section">'
+                f'<h2>15. General Notes</h2>'
+                f'{metric("Submissions with Notes", notes_count, total_pois)}'
+                f'</section>')
+
+        # Footer
+        footer = (
+            f'<div class="footer">'
+            f'<p>Report generated on {now_str}</p>'
+            f'<p>POI Field Survey | Powered by Survey123 & ArcGIS Online</p>'
+            f'</div>')
+
+        body = (header + kpis + agents_sec + category_sec + status_sec
+                + identity_sec + location_sec + building_sec + hours_sec
+                + language_sec + payment_sec + restaurant_sec
+                + facilities_sec + ramadan_sec + media_sec + quality_sec
+                + notes_sec + footer)
+
+        css = REPORT_CSS
+        full_html = (
+            f'<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">'
+            f'<meta name="viewport" content="width=device-width,initial-scale=1">'
+            f'<title>POI Field Survey Report</title>'
+            f'<style>{css}</style></head><body>{body}</body></html>')
+
+        resp = make_response(full_html)
+        resp.headers["Content-Type"] = "text/html; charset=utf-8"
+        return resp
+
+    except Exception as e:
+        logger.error("Client report error: %s", str(e), exc_info=True)
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
