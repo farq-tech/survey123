@@ -193,6 +193,8 @@ def get_submission(sub_id):
 def _get_arcgis_token():
     """Get an ArcGIS Online token using stored credentials."""
     if not ARCGIS_USERNAME or not ARCGIS_PASSWORD:
+        logger.warning("ArcGIS credentials not set: username=%s, password=%s",
+                        bool(ARCGIS_USERNAME), bool(ARCGIS_PASSWORD))
         return None
     try:
         r = http_requests.post(
@@ -206,7 +208,10 @@ def _get_arcgis_token():
             timeout=15,
         )
         data = r.json()
-        return data.get("token")
+        token = data.get("token")
+        if not token:
+            logger.warning("ArcGIS token response (no token): %s", json.dumps(data))
+        return token
     except Exception as e:
         logger.warning("Failed to get ArcGIS token: %s", e)
         return None
@@ -495,6 +500,7 @@ def report():
         report_data = {
             "report_title": "POI Field Survey Report",
             "generated_at": datetime.now(timezone.utc).isoformat(),
+            "version": "2.1",
             "total_pois_gathered": total_pois,
             "total_photos_taken": total_photos,
             "total_videos_taken": total_videos,
@@ -666,6 +672,59 @@ def report():
     except Exception as e:
         logger.error("Report error: %s", str(e), exc_info=True)
         return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.route("/debug/attachments", methods=["GET"])
+def debug_attachments():
+    """Debug endpoint to check ArcGIS token and attachment query."""
+    info = {
+        "has_username": bool(ARCGIS_USERNAME),
+        "has_password": bool(ARCGIS_PASSWORD),
+        "service_url": ARCGIS_SERVICE_URL,
+    }
+
+    token = _get_arcgis_token()
+    info["token_obtained"] = bool(token)
+
+    if token:
+        try:
+            r = http_requests.get(
+                f"{ARCGIS_SERVICE_URL}/query",
+                params={
+                    "where": "agent_name IS NOT NULL AND agent_name <> ''",
+                    "returnIdsOnly": "true",
+                    "f": "json",
+                    "token": token,
+                },
+                timeout=30,
+            )
+            oid_data = r.json()
+            oids = oid_data.get("objectIds", [])
+            info["survey_submissions_found"] = len(oids)
+            info["sample_oids"] = oids[:5]
+
+            if oids:
+                batch = oids[:10]
+                ids_str = ",".join(str(o) for o in batch)
+                r2 = http_requests.get(
+                    f"{ARCGIS_SERVICE_URL}/queryAttachments",
+                    params={
+                        "objectIds": ids_str,
+                        "f": "json",
+                        "token": token,
+                    },
+                    timeout=30,
+                )
+                att_data = r2.json()
+                info["attachment_query_sample"] = att_data
+        except Exception as e:
+            info["query_error"] = str(e)
+
+    photos, videos = _get_attachment_counts()
+    info["total_photos"] = photos
+    info["total_videos"] = videos
+
+    return jsonify(info), 200
 
 
 with app.app_context():
