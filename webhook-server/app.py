@@ -3,10 +3,12 @@ import json
 import logging
 from datetime import datetime, timezone
 from flask import Flask, request, jsonify
+from flask_cors import CORS
 import psycopg2
 from psycopg2.extras import Json
 
 app = Flask(__name__)
+CORS(app)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -60,7 +62,7 @@ def health():
     })
 
 
-@app.route("/webhook", methods=["POST"])
+@app.route("/webhook", methods=["POST", "OPTIONS"])
 def webhook():
     try:
         payload = request.get_json(force=True)
@@ -177,6 +179,421 @@ def get_submission(sub_id):
         return jsonify(data), 200
 
     except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+def _count_attr(rows, key):
+    """Count non-empty values for a given attribute key across all rows."""
+    count = 0
+    for attrs in rows:
+        val = attrs.get(key)
+        if val is not None and str(val).strip() != "":
+            count += 1
+    return count
+
+
+def _distribution(rows, key, label_map=None):
+    """Get value distribution for a given attribute key."""
+    dist = {}
+    for attrs in rows:
+        val = attrs.get(key)
+        if val is not None and str(val).strip() != "":
+            label = val
+            if label_map and val in label_map:
+                label = label_map[val]
+            dist[label] = dist.get(label, 0) + 1
+    return dict(sorted(dist.items(), key=lambda x: -x[1]))
+
+
+PHOTO_FIELDS = [
+    "entrance_photo", "license_photo",
+    "business_exterior", "exterior_photo_2",
+    "business_interior", "interior_photo_2",
+    "menu_photo_1", "menu_photo_2", "menu_photo_3",
+    "additional_photo",
+]
+
+VIDEO_FIELDS = [
+    "interior_walkthrough_video",
+]
+
+# Fields to SKIP entirely from the report (business/legal name)
+SKIP_FIELDS = ["legal_name"]
+
+CATEGORY_LABELS = {
+    "health_medical": "Health & Medical",
+    "finance_insurance": "Finance & Insurance",
+    "culture_art": "Culture & Art",
+    "life_convenience": "Life & Convenience",
+    "services_industry": "Services & Industry",
+    "shopping_distribution": "Shopping & Distribution",
+    "accommodation": "Accommodation",
+    "restaurants": "Restaurants",
+}
+
+STATUS_LABELS = {
+    "open": "Open",
+    "closed": "Permanently Closed",
+    "temporary_closed": "Temporarily Closed",
+    "under_construction": "Under Construction",
+    "coming_soon": "Coming Soon",
+    "relocated": "Relocated",
+}
+
+
+@app.route("/report", methods=["GET"])
+def report():
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT attributes, agent_name, category, subcategory,
+                           submitted_at, received_at
+                    FROM survey_submissions
+                    ORDER BY submitted_at
+                """)
+                columns = [desc[0] for desc in cur.description]
+                raw_rows = [dict(zip(columns, row)) for row in cur.fetchall()]
+
+        all_attrs = [r.get("attributes") or {} for r in raw_rows]
+        total_pois = len(raw_rows)
+
+        # --- Total Photos ---
+        total_photos = 0
+        photo_breakdown = {}
+        for field in PHOTO_FIELDS:
+            count = _count_attr(all_attrs, field)
+            if count > 0:
+                total_photos += count
+                photo_breakdown[field.replace("_", " ").title()] = count
+
+        # --- Total Videos ---
+        total_videos = 0
+        video_breakdown = {}
+        for field in VIDEO_FIELDS:
+            count = _count_attr(all_attrs, field)
+            if count > 0:
+                total_videos += count
+                video_breakdown[field.replace("_", " ").title()] = count
+
+        # --- Agent breakdown ---
+        agent_dist = _distribution(all_attrs, "agent_name")
+
+        # --- Category breakdown ---
+        category_dist = _distribution(all_attrs, "category", CATEGORY_LABELS)
+
+        # --- Subcategory breakdown ---
+        subcategory_dist = _distribution(all_attrs, "secondary_category")
+
+        # --- Status breakdown ---
+        status_dist = _distribution(all_attrs, "company_status", STATUS_LABELS)
+
+        # --- Coordinates: only include if there are answers ---
+        coords_answered = 0
+        for attrs in all_attrs:
+            lat = attrs.get("latitude") or attrs.get("corrected_lat")
+            lon = attrs.get("longitude") or attrs.get("corrected_lon")
+            if lat and lon:
+                coords_answered += 1
+        location_correct_dist = _distribution(all_attrs, "location_correct")
+
+        # --- Building & Floor ---
+        building_dist = _distribution(all_attrs, "building_number")
+        floor_dist = _distribution(all_attrs, "floor_number")
+
+        # --- Contact ---
+        phone_count = _count_attr(all_attrs, "phone_number")
+        website_count = _count_attr(all_attrs, "website")
+        social_count = _count_attr(all_attrs, "social_media")
+
+        # --- License ---
+        license_count = _count_attr(all_attrs, "commercial_license_number")
+        license_photo_count = _count_attr(all_attrs, "license_photo")
+
+        # --- Hours ---
+        working_days_dist = _distribution(all_attrs, "working_days")
+        working_hours_dist = _distribution(all_attrs, "working_hours_each_day")
+        break_time_dist = _distribution(all_attrs, "break_time_each_day")
+
+        # --- Identity (name corrections, EXCLUDING legal_name) ---
+        identity_correct_dist = _distribution(all_attrs, "identity_correct")
+        name_ar_count = _count_attr(all_attrs, "name_ar")
+        name_en_count = _count_attr(all_attrs, "name_en")
+
+        # --- Language ---
+        language_dist = {}
+        for attrs in all_attrs:
+            lang_val = attrs.get("language", "")
+            if lang_val:
+                for lang in str(lang_val).split(","):
+                    lang = lang.strip()
+                    if lang:
+                        language_dist[lang] = language_dist.get(lang, 0) + 1
+        language_dist = dict(sorted(language_dist.items(), key=lambda x: -x[1]))
+
+        # --- Landmark & Pickup ---
+        landmark_dist = _distribution(all_attrs, "is_landmark")
+        pickup_dist = _distribution(all_attrs, "pickup_point_exists")
+
+        # --- Entrance ---
+        entrance_photo_count = _count_attr(all_attrs, "entrance_photo")
+        entrance_desc_count = _count_attr(all_attrs, "entrance_description")
+
+        # --- Menu ---
+        physical_menu_dist = _distribution(all_attrs, "has_physical_menu")
+        digital_menu_dist = _distribution(all_attrs, "has_digital_menu")
+
+        # --- Cuisine ---
+        cuisine_dist = {}
+        for attrs in all_attrs:
+            c_val = attrs.get("cuisine", "")
+            if c_val:
+                for c in str(c_val).split(","):
+                    c = c.strip()
+                    if c:
+                        cuisine_dist[c] = cuisine_dist.get(c, 0) + 1
+        cuisine_dist = dict(sorted(cuisine_dist.items(), key=lambda x: -x[1]))
+
+        # --- Payment ---
+        payment_dist = {}
+        for attrs in all_attrs:
+            p_val = attrs.get("accepted_payment_methods", "")
+            if p_val:
+                for p in str(p_val).split(","):
+                    p = p.strip()
+                    if p:
+                        payment_dist[p] = payment_dist.get(p, 0) + 1
+        payment_dist = dict(sorted(payment_dist.items(), key=lambda x: -x[1]))
+
+        # --- Parking ---
+        parking_dist = _distribution(all_attrs, "has_parking_lot")
+        valet_dist = _distribution(all_attrs, "valet_parking")
+        drive_thru_dist = _distribution(all_attrs, "drive_thru")
+
+        # --- Accessibility ---
+        wheelchair_dist = _distribution(all_attrs, "is_wheelchair_accessible")
+        wifi_dist = _distribution(all_attrs, "wifi")
+
+        # --- Seating ---
+        dine_in_dist = _distribution(all_attrs, "dine_in")
+        delivery_dist = _distribution(all_attrs, "only_delivery")
+        family_dist = _distribution(all_attrs, "has_family_seating")
+        separate_rooms_dist = _distribution(all_attrs, "has_separate_rooms_for_dining")
+        large_groups_dist = _distribution(all_attrs, "large_groups_can_be_seated")
+        order_car_dist = _distribution(all_attrs, "order_from_car")
+
+        # --- Entertainment ---
+        music_dist = _distribution(all_attrs, "music")
+        sports_dist = _distribution(all_attrs, "live_sport_broadcasting")
+        shisha_dist = _distribution(all_attrs, "shisha")
+        children_dist = _distribution(all_attrs, "children_area")
+
+        # --- Smoking & Waiting ---
+        smoking_dist = _distribution(all_attrs, "has_smoking_area")
+        waiting_dist = _distribution(all_attrs, "has_a_waiting_area")
+        reservation_dist = _distribution(all_attrs, "reservation")
+
+        # --- Prayer ---
+        prayer_dist = _distribution(all_attrs, "has_women_only_prayer_room")
+
+        # --- Ramadan ---
+        iftar_dist = _distribution(all_attrs, "offers_iftar_menu")
+        suhoor_dist = _distribution(all_attrs, "is_open_during_suhoor")
+        iftar_tent_dist = _distribution(all_attrs, "provides_iftar_tent")
+
+        # --- Special ---
+        ticket_dist = _distribution(all_attrs, "require_ticket")
+        free_entry_dist = _distribution(all_attrs, "is_free_entry")
+
+        # --- Notes ---
+        notes_count = _count_attr(all_attrs, "general_notes")
+
+        # Build report - only include sections that have data
+        report_data = {
+            "report_title": "POI Field Survey Report",
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "total_pois_gathered": total_pois,
+            "total_photos_taken": total_photos,
+            "total_videos_taken": total_videos,
+            "sections": []
+        }
+
+        def add_section(title, data_dict):
+            """Only add section if it has non-empty data."""
+            # Filter out empty distributions
+            filtered = {}
+            for k, v in data_dict.items():
+                if isinstance(v, dict) and len(v) == 0:
+                    continue
+                if isinstance(v, int) and v == 0:
+                    continue
+                if v is None:
+                    continue
+                filtered[k] = v
+            if filtered:
+                report_data["sections"].append({
+                    "title": title,
+                    **filtered
+                })
+
+        add_section("Agents", {
+            "agent_distribution": agent_dist,
+        })
+
+        add_section("1. Identity & Names", {
+            "names_arabic_collected": name_ar_count,
+            "names_english_collected": name_en_count,
+            "identity_correct": identity_correct_dist,
+        })
+
+        add_section("2. Category", {
+            "category_distribution": category_dist,
+            "subcategory_distribution": subcategory_dist,
+        })
+
+        add_section("3. Company Status", {
+            "status_distribution": status_dist,
+        })
+
+        add_section("4. Commercial License", {
+            "licenses_collected": license_count,
+            "license_photos_taken": license_photo_count,
+        })
+
+        add_section("5. Coordinates", {
+            "pois_with_coordinates": coords_answered,
+            "location_correct": location_correct_dist,
+        })
+
+        add_section("6. Building & Floor", {
+            "building_distribution": building_dist,
+            "floor_distribution": floor_dist,
+        })
+
+        add_section("7. Entrance", {
+            "entrance_photos_taken": entrance_photo_count,
+            "entrance_descriptions": entrance_desc_count,
+        })
+
+        add_section("8. Contact Info", {
+            "phone_numbers_collected": phone_count,
+            "websites_collected": website_count,
+            "social_media_collected": social_count,
+        })
+
+        add_section("9. Language, Landmark & Pickup", {
+            "languages_distribution": language_dist,
+            "is_landmark": landmark_dist,
+            "pickup_point_exists": pickup_dist,
+        })
+
+        add_section("10. Working Hours", {
+            "working_days_distribution": working_days_dist,
+            "working_hours_distribution": working_hours_dist,
+            "break_time_distribution": break_time_dist,
+        })
+
+        add_section("11. Business Exterior Photos", {
+            "exterior_photos_taken": _count_attr(all_attrs, "business_exterior")
+                                    + _count_attr(all_attrs, "exterior_photo_2"),
+        })
+
+        add_section("12. Business Interior Photos", {
+            "interior_photos_taken": _count_attr(all_attrs, "business_interior")
+                                    + _count_attr(all_attrs, "interior_photo_2"),
+        })
+
+        add_section("13. Interior Walkthrough Video", {
+            "videos_taken": total_videos,
+        })
+
+        add_section("14. Physical Menu Photos", {
+            "has_physical_menu": physical_menu_dist,
+            "menu_photos_taken": _count_attr(all_attrs, "menu_photo_1")
+                                + _count_attr(all_attrs, "menu_photo_2")
+                                + _count_attr(all_attrs, "menu_photo_3"),
+        })
+
+        add_section("15. Digital Menu / QR", {
+            "has_digital_menu": digital_menu_dist,
+        })
+
+        add_section("16. Cuisine", {
+            "cuisine_distribution": cuisine_dist,
+        })
+
+        add_section("17. Payment Methods", {
+            "payment_distribution": payment_dist,
+        })
+
+        add_section("18. Parking & Valet", {
+            "has_parking": parking_dist,
+            "valet_parking": valet_dist,
+            "drive_thru": drive_thru_dist,
+        })
+
+        add_section("19. Accessibility & WiFi", {
+            "wheelchair_accessible": wheelchair_dist,
+            "wifi_available": wifi_dist,
+        })
+
+        add_section("20. Seating", {
+            "dine_in": dine_in_dist,
+            "only_delivery": delivery_dist,
+            "family_seating": family_dist,
+            "separate_dining_rooms": separate_rooms_dist,
+            "large_groups": large_groups_dist,
+            "order_from_car": order_car_dist,
+        })
+
+        add_section("21. Entertainment", {
+            "music": music_dist,
+            "live_sports": sports_dist,
+            "shisha": shisha_dist,
+            "children_area": children_dist,
+        })
+
+        add_section("22. Smoking & Waiting", {
+            "smoking_area": smoking_dist,
+            "waiting_area": waiting_dist,
+            "reservation": reservation_dist,
+        })
+
+        add_section("23. Prayer Rooms", {
+            "women_prayer_room": prayer_dist,
+        })
+
+        add_section("24. Iftar & Suhoor", {
+            "offers_iftar": iftar_dist,
+            "open_during_suhoor": suhoor_dist,
+            "iftar_tent": iftar_tent_dist,
+        })
+
+        add_section("25. Attraction / Special", {
+            "require_ticket": ticket_dist,
+            "free_entry": free_entry_dist,
+        })
+
+        add_section("Notes", {
+            "submissions_with_notes": notes_count,
+        })
+
+        # Photos summary section
+        add_section("Photos Summary", {
+            "total_photos": total_photos,
+            "breakdown": photo_breakdown,
+        })
+
+        # Videos summary section
+        add_section("Videos Summary", {
+            "total_videos": total_videos,
+            "breakdown": video_breakdown,
+        })
+
+        return jsonify(report_data), 200
+
+    except Exception as e:
+        logger.error("Report error: %s", str(e), exc_info=True)
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
