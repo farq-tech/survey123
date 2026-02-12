@@ -6,6 +6,7 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 import psycopg2
 from psycopg2.extras import Json
+import requests as http_requests
 
 app = Flask(__name__)
 CORS(app)
@@ -13,6 +14,13 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
+ARCGIS_USERNAME = os.environ.get("ARCGIS_USERNAME")
+ARCGIS_PASSWORD = os.environ.get("ARCGIS_PASSWORD")
+ARCGIS_SERVICE_URL = os.environ.get(
+    "ARCGIS_SERVICE_URL",
+    "https://services5.arcgis.com/pYlVm2T6SvR7ytZv/arcgis/rest/services"
+    "/service_36f94509389d4a85a311cc6aa9c7398e_form/FeatureServer/0"
+)
 
 
 def get_db():
@@ -182,6 +190,86 @@ def get_submission(sub_id):
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
+def _get_arcgis_token():
+    """Get an ArcGIS Online token using stored credentials."""
+    if not ARCGIS_USERNAME or not ARCGIS_PASSWORD:
+        return None
+    try:
+        r = http_requests.post(
+            "https://www.arcgis.com/sharing/rest/generateToken",
+            data={
+                "username": ARCGIS_USERNAME,
+                "password": ARCGIS_PASSWORD,
+                "referer": "https://www.arcgis.com",
+                "f": "json",
+            },
+            timeout=15,
+        )
+        data = r.json()
+        return data.get("token")
+    except Exception as e:
+        logger.warning("Failed to get ArcGIS token: %s", e)
+        return None
+
+
+def _get_attachment_counts():
+    """Query ArcGIS feature service for photo and video attachment counts."""
+    token = _get_arcgis_token()
+    if not token:
+        return None, None
+
+    try:
+        # Get all object IDs from the survey layer
+        r = http_requests.get(
+            f"{ARCGIS_SERVICE_URL}/query",
+            params={
+                "where": "1=1",
+                "returnIdsOnly": "true",
+                "f": "json",
+                "token": token,
+            },
+            timeout=30,
+        )
+        oid_data = r.json()
+        object_ids = oid_data.get("objectIds", [])
+        if not object_ids:
+            return 0, 0
+
+        # Query attachments in batches (API limit ~100 IDs at a time)
+        total_photos = 0
+        total_videos = 0
+        batch_size = 100
+
+        for i in range(0, len(object_ids), batch_size):
+            batch_ids = object_ids[i : i + batch_size]
+            ids_str = ",".join(str(oid) for oid in batch_ids)
+
+            r = http_requests.get(
+                f"{ARCGIS_SERVICE_URL}/queryAttachments",
+                params={
+                    "objectIds": ids_str,
+                    "f": "json",
+                    "token": token,
+                },
+                timeout=30,
+            )
+            att_data = r.json()
+
+            for group in att_data.get("attachmentGroups", []):
+                for att in group.get("attachmentInfos", []):
+                    content_type = (att.get("contentType") or "").lower()
+                    if content_type.startswith("image/"):
+                        total_photos += 1
+                    elif content_type.startswith("video/"):
+                        total_videos += 1
+
+        return total_photos, total_videos
+
+    except Exception as e:
+        logger.warning("Failed to query ArcGIS attachments: %s", e)
+        return None, None
+
+
 def _count_attr(rows, key):
     """Count non-empty values for a given attribute key across all rows."""
     count = 0
@@ -258,23 +346,10 @@ def report():
         all_attrs = [r.get("attributes") or {} for r in raw_rows]
         total_pois = len(raw_rows)
 
-        # --- Total Photos ---
-        total_photos = 0
-        photo_breakdown = {}
-        for field in PHOTO_FIELDS:
-            count = _count_attr(all_attrs, field)
-            if count > 0:
-                total_photos += count
-                photo_breakdown[field.replace("_", " ").title()] = count
-
-        # --- Total Videos ---
-        total_videos = 0
-        video_breakdown = {}
-        for field in VIDEO_FIELDS:
-            count = _count_attr(all_attrs, field)
-            if count > 0:
-                total_videos += count
-                video_breakdown[field.replace("_", " ").title()] = count
+        # --- Photos & Videos from ArcGIS attachments ---
+        arcgis_photos, arcgis_videos = _get_attachment_counts()
+        total_photos = arcgis_photos if arcgis_photos is not None else 0
+        total_videos = arcgis_videos if arcgis_videos is not None else 0
 
         # --- Agent breakdown ---
         agent_dist = _distribution(all_attrs, "agent_name")
@@ -576,18 +651,6 @@ def report():
 
         add_section("Notes", {
             "submissions_with_notes": notes_count,
-        })
-
-        # Photos summary section
-        add_section("Photos Summary", {
-            "total_photos": total_photos,
-            "breakdown": photo_breakdown,
-        })
-
-        # Videos summary section
-        add_section("Videos Summary", {
-            "total_videos": total_videos,
-            "breakdown": video_breakdown,
         })
 
         return jsonify(report_data), 200
