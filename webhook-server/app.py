@@ -212,36 +212,28 @@ def _get_arcgis_token():
         return None
 
 
-def _get_attachment_counts():
-    """Query ArcGIS feature service for photo and video attachment counts."""
+def _get_attachment_counts(submission_oids):
+    """Query ArcGIS feature service for photo and video attachment counts.
+
+    Only queries attachments for the given object IDs (from our database),
+    not the entire feature service which may have thousands of POI records.
+    """
     token = _get_arcgis_token()
     if not token:
         return None, None
 
-    try:
-        # Get all object IDs from the survey layer
-        r = http_requests.get(
-            f"{ARCGIS_SERVICE_URL}/query",
-            params={
-                "where": "1=1",
-                "returnIdsOnly": "true",
-                "f": "json",
-                "token": token,
-            },
-            timeout=30,
-        )
-        oid_data = r.json()
-        object_ids = oid_data.get("objectIds", [])
-        if not object_ids:
-            return 0, 0
+    # Filter to valid object IDs only
+    valid_oids = [oid for oid in submission_oids if oid is not None]
+    if not valid_oids:
+        return 0, 0
 
-        # Query attachments in batches (API limit ~100 IDs at a time)
+    try:
         total_photos = 0
         total_videos = 0
         batch_size = 100
 
-        for i in range(0, len(object_ids), batch_size):
-            batch_ids = object_ids[i : i + batch_size]
+        for i in range(0, len(valid_oids), batch_size):
+            batch_ids = valid_oids[i : i + batch_size]
             ids_str = ",".join(str(oid) for oid in batch_ids)
 
             r = http_requests.get(
@@ -254,6 +246,11 @@ def _get_attachment_counts():
                 timeout=30,
             )
             att_data = r.json()
+
+            if "error" in att_data:
+                logger.warning("ArcGIS attachment query error: %s",
+                               att_data["error"])
+                return None, None
 
             for group in att_data.get("attachmentGroups", []):
                 for att in group.get("attachmentInfos", []):
@@ -336,7 +333,7 @@ def report():
             with conn.cursor() as cur:
                 cur.execute("""
                     SELECT attributes, agent_name, category, subcategory,
-                           submitted_at, received_at
+                           submitted_at, received_at, object_id
                     FROM survey_submissions
                     ORDER BY submitted_at
                 """)
@@ -344,10 +341,11 @@ def report():
                 raw_rows = [dict(zip(columns, row)) for row in cur.fetchall()]
 
         all_attrs = [r.get("attributes") or {} for r in raw_rows]
+        submission_oids = [r.get("object_id") for r in raw_rows]
         total_pois = len(raw_rows)
 
         # --- Photos & Videos from ArcGIS attachments ---
-        arcgis_photos, arcgis_videos = _get_attachment_counts()
+        arcgis_photos, arcgis_videos = _get_attachment_counts(submission_oids)
         total_photos = arcgis_photos if arcgis_photos is not None else 0
         total_videos = arcgis_videos if arcgis_videos is not None else 0
 
