@@ -212,28 +212,39 @@ def _get_arcgis_token():
         return None
 
 
-def _get_attachment_counts(submission_oids):
+def _get_attachment_counts():
     """Query ArcGIS feature service for photo and video attachment counts.
 
-    Only queries attachments for the given object IDs (from our database),
-    not the entire feature service which may have thousands of POI records.
+    Finds actual survey submissions (where agent_name is set) and counts
+    their attachments by content type.
     """
     token = _get_arcgis_token()
     if not token:
         return None, None
 
-    # Filter to valid object IDs only
-    valid_oids = [oid for oid in submission_oids if oid is not None]
-    if not valid_oids:
-        return 0, 0
-
     try:
+        # Get object IDs for actual survey submissions (not pre-loaded POIs)
+        r = http_requests.get(
+            f"{ARCGIS_SERVICE_URL}/query",
+            params={
+                "where": "agent_name IS NOT NULL AND agent_name <> ''",
+                "returnIdsOnly": "true",
+                "f": "json",
+                "token": token,
+            },
+            timeout=30,
+        )
+        oid_data = r.json()
+        object_ids = oid_data.get("objectIds", [])
+        if not object_ids:
+            return 0, 0
+
         total_photos = 0
         total_videos = 0
         batch_size = 100
 
-        for i in range(0, len(valid_oids), batch_size):
-            batch_ids = valid_oids[i : i + batch_size]
+        for i in range(0, len(object_ids), batch_size):
+            batch_ids = object_ids[i : i + batch_size]
             ids_str = ",".join(str(oid) for oid in batch_ids)
 
             r = http_requests.get(
@@ -333,7 +344,7 @@ def report():
             with conn.cursor() as cur:
                 cur.execute("""
                     SELECT attributes, agent_name, category, subcategory,
-                           submitted_at, received_at, object_id
+                           submitted_at, received_at
                     FROM survey_submissions
                     ORDER BY submitted_at
                 """)
@@ -341,11 +352,10 @@ def report():
                 raw_rows = [dict(zip(columns, row)) for row in cur.fetchall()]
 
         all_attrs = [r.get("attributes") or {} for r in raw_rows]
-        submission_oids = [r.get("object_id") for r in raw_rows]
         total_pois = len(raw_rows)
 
         # --- Photos & Videos from ArcGIS attachments ---
-        arcgis_photos, arcgis_videos = _get_attachment_counts(submission_oids)
+        arcgis_photos, arcgis_videos = _get_attachment_counts()
         total_photos = arcgis_photos if arcgis_photos is not None else 0
         total_videos = arcgis_videos if arcgis_videos is not None else 0
 
