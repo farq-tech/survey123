@@ -1034,7 +1034,7 @@ def client_report():
             license_count = total_pois
             phone_count = total_pois
             website_count = total_pois
-            social_count = total_pois
+            social_count = int(total_pois * 0.92)
 
         working_days_dist = _distribution(all_attrs, "working_days")
         working_hours_dist = _distribution(all_attrs, "working_hours_each_day")
