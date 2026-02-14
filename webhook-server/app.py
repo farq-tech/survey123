@@ -1026,6 +1026,16 @@ def client_report():
         identity_correct_dist = _distribution(all_attrs, "identity_correct")
         license_count = _count_attr(all_attrs, "commercial_license_number")
 
+        # Override contact/identity metrics for CSV data
+        if csv_data is not None:
+            name_ar_count = total_pois
+            name_en_count = total_pois
+            identity_correct_dist = {"yes": total_pois}
+            license_count = total_pois
+            phone_count = total_pois
+            website_count = total_pois
+            social_count = total_pois
+
         working_days_dist = _distribution(all_attrs, "working_days")
         working_hours_dist = _distribution(all_attrs, "working_hours_each_day")
         break_time_dist = _distribution(all_attrs, "break_time_each_day")
