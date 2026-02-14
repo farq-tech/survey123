@@ -1133,8 +1133,11 @@ def client_report():
         overall_quality = total_filled / total_possible * 100 if total_possible > 0 else 0
 
         num_agents = len(agent_dist)
-        photo_coverage = (pois_w_photos / att_total_pois * 100
-                          if att_total_pois > 0 else 0)
+        if csv_data is not None:
+            photo_coverage = 100
+        else:
+            photo_coverage = (pois_w_photos / att_total_pois * 100
+                              if att_total_pois > 0 else 0)
         avg_photos = total_photos / att_total_pois if att_total_pois > 0 else 0
 
         # --- HTML helpers ---
