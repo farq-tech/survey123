@@ -1,4 +1,5 @@
 import os
+import csv
 import json
 import logging
 from datetime import datetime, timezone
@@ -412,6 +413,201 @@ PHOTO_TYPE_LABELS = {
     "interior_walkthrough_video": "Video (Walkthrough)",
 }
 
+# ---------- CSV-based data loading for client report ----------
+
+CSV_DATA_PATH = os.path.join(os.path.dirname(__file__), "data", "final_data.csv")
+
+CSV_CATEGORY_MAP = {
+    # Restaurants & F&B
+    "Restaurant": "Restaurants",
+    "restaurants": "Restaurants",
+    "Café": "Restaurants",
+    "Coffee Shop": "Restaurants",
+    "Coffee Shops": "Restaurants",
+    "Bakery": "Restaurants",
+    "Cafe": "Restaurants",
+    "Dessert Shop": "Restaurants",
+    # Shopping & Distribution
+    "Retail": "Shopping & Distribution",
+    "Shopping": "Shopping & Distribution",
+    "Grocery": "Shopping & Distribution",
+    "Fuel Stations": "Shopping & Distribution",
+    "Home Goods": "Shopping & Distribution",
+    # Services & Industry
+    "Corporate": "Services & Industry",
+    "Corporate Office": "Services & Industry",
+    "Automotive Services": "Services & Industry",
+    "Automotive Service": "Services & Industry",
+    "Automotive Repair": "Services & Industry",
+    "Car Rental": "Services & Industry",
+    "Repair Workshop": "Services & Industry",
+    "Construction": "Services & Industry",
+    "Construction Services": "Services & Industry",
+    "Contracting": "Services & Industry",
+    "Contractor": "Services & Industry",
+    "Engineering Consultancy": "Services & Industry",
+    "Energy and Utilities": "Services & Industry",
+    "Environmental Services": "Services & Industry",
+    "HVAC Services": "Services & Industry",
+    "Cleaning Service": "Services & Industry",
+    "Laundry": "Services & Industry",
+    "Laundry Service": "Services & Industry",
+    "Professional Services": "Services & Industry",
+    "Business Consulting": "Services & Industry",
+    "Legal Services": "Services & Industry",
+    "Real Estate": "Services & Industry",
+    "Real Estate Agency": "Services & Industry",
+    "Facilities Services": "Services & Industry",
+    "Home Services": "Services & Industry",
+    "Media company": "Services & Industry",
+    "Photography Studio": "Services & Industry",
+    "Services": "Services & Industry",
+    "Telecommunication": "Services & Industry",
+    "Telecommunications": "Services & Industry",
+    "Translation Service": "Services & Industry",
+    "Travel Agency": "Services & Industry",
+    "Event Planners": "Services & Industry",
+    "Event Planning": "Services & Industry",
+    "Event Venue": "Services & Industry",
+    # Life & Convenience
+    "Education": "Life & Convenience",
+    "Educational Institution": "Life & Convenience",
+    "School": "Life & Convenience",
+    "Childcare": "Life & Convenience",
+    "Mosques": "Life & Convenience",
+    "Mosque": "Life & Convenience",
+    "Public Parks": "Life & Convenience",
+    "Park": "Life & Convenience",
+    "Neighborhood": "Life & Convenience",
+    "Residential Compound": "Life & Convenience",
+    "Transportation": "Life & Convenience",
+    "Government": "Life & Convenience",
+    "Government Services": "Life & Convenience",
+    "Public Services": "Life & Convenience",
+    "Emergency Services": "Life & Convenience",
+    "Non-profit organization": "Life & Convenience",
+    "Non-Profit Organization": "Life & Convenience",
+    # Health & Medical
+    "Healthcare": "Health & Medical",
+    "Hospitals": "Health & Medical",
+    "Medical Center": "Health & Medical",
+    "Medical Clinic": "Health & Medical",
+    "Clinic": "Health & Medical",
+    "Beauty Clinic": "Health & Medical",
+    "Pharmacies": "Health & Medical",
+    "Pharmacy": "Health & Medical",
+    "Health & Wellness Center": "Health & Medical",
+    "Beauty and Spa": "Health & Medical",
+    "Salon": "Health & Medical",
+    # Finance & Insurance
+    "Banks": "Finance & Insurance",
+    "Bank": "Finance & Insurance",
+    "Insurance Company": "Finance & Insurance",
+    "finance_insurance": "Finance & Insurance",
+    # Accommodation
+    "Hotels and Accommodations": "Accommodation",
+    "Hotel": "Accommodation",
+    "Coworking Space": "Accommodation",
+    # Culture & Art
+    "Cultural Sites": "Culture & Art",
+    # Entertainment & Sports
+    "Entertainment": "Entertainment & Sports",
+    "Sports": "Entertainment & Sports",
+    "Sports Club": "Entertainment & Sports",
+    "Gym": "Entertainment & Sports",
+}
+
+CSV_COL_MAP = {
+    "GlobalID": "global_id",
+    "Name (Arabic)": "name_ar",
+    "Name (English)": "name_en",
+    "Legal Name": "legal_name",
+    "Category": "category",
+    "Secondary Category": "secondary_category",
+    "Company Status": "company_status",
+    "Working Days": "working_days",
+    "Working Hours": "working_hours_each_day",
+    "Break Time": "break_time_each_day",
+    "Holidays": "holidays",
+    "Entrance Location": "entrance_location",
+    "Building Number": "building_number",
+    "Floor Number": "floor_number",
+    "Phone Number": "phone_number",
+    "Website": "website",
+    "Social Media Accounts": "social_media",
+    "Accepted Payment Methods": "accepted_payment_methods",
+    "Commercial License Number": "commercial_license_number",
+    "Language": "language",
+    "Cuisine Type": "cuisine",
+    "Menu Barcode URL": "menu_barcode_url",
+    "Coordinates X": "latitude",
+    "Coordinates Y": "longitude",
+    "Dine In": "dine_in",
+    "Only Delivery": "only_delivery",
+    "Shisha": "shisha",
+    "Order from Car": "order_from_car",
+    "Live Sport Broadcasting": "live_sport_broadcasting",
+    "Family Seating": "has_family_seating",
+    "Large Groups Can Be Seated": "large_groups_can_be_seated",
+    "Has a Waiting Area": "has_a_waiting_area",
+    "Has Separate Rooms": "has_separate_rooms",
+    "Smoking Area": "has_smoking_area",
+    "Iftar Menu": "offers_iftar_menu",
+    "Suhoor": "is_open_during_suhoor",
+    "Require Ticket": "require_ticket",
+    "Is Landmark": "is_landmark",
+    "Free Entry": "free_entry",
+    "Has Women-Only Prayer Room": "has_women_only_prayer_room",
+    "Provides Iftar Tent": "provides_iftar_tent",
+    "Drive Thru": "drive_thru",
+    "WiFi": "wifi",
+    "Reservation": "reservation",
+    "Pickup Point Exists": "pickup_point_exists",
+    "Children Area": "children_area",
+    "Valet Parking": "valet_parking",
+    "Music": "music",
+    "Has Parking Lot": "has_parking_lot",
+    "Wheelchair Accessible": "is_wheelchair_accessible",
+    "District (English)": "district_en",
+    "District (Arabic)": "district_ar",
+    "City(english)": "city",
+    "POI ID": "poi_id",
+    "Detail Category": "detail_category",
+    "city(Arabic)": "address",
+    "Survey Date": "survey_date",
+    "Agent Name": "agent_name",
+    "Notes": "general_notes",
+}
+
+
+def _load_csv_data():
+    """Load POI data from the final CSV file and return list of attribute dicts."""
+    if not os.path.exists(CSV_DATA_PATH):
+        return None
+    rows = []
+    with open(CSV_DATA_PATH, "r", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            attrs = {}
+            for csv_col, attr_key in CSV_COL_MAP.items():
+                val = row.get(csv_col, "").strip()
+                if val and val != "#ERROR!":
+                    # Normalize yes/no values to lowercase
+                    if val.lower() in ("yes", "no"):
+                        val = val.lower()
+                    elif val == "N/A":
+                        val = ""
+                    attrs[attr_key] = val
+                else:
+                    attrs[attr_key] = ""
+            # Normalize category names with special characters
+            cat = attrs.get("category", "")
+            if cat.lower().startswith("caf"):
+                attrs["category"] = "Cafe"
+            rows.append(attrs)
+    return rows
+
+
 REPORT_CSS = """
 *{margin:0;padding:0;box-sizing:border-box}
 body{font-family:'Segoe UI',-apple-system,BlinkMacSystemFont,Roboto,sans-serif;
@@ -787,18 +983,23 @@ def report():
 @app.route("/client-report", methods=["GET"])
 def client_report():
     try:
-        with get_db() as conn:
-            with conn.cursor() as cur:
-                cur.execute("""
-                    SELECT attributes, agent_name, submitted_at
-                    FROM survey_submissions
-                    ORDER BY submitted_at
-                """)
-                columns = [desc[0] for desc in cur.description]
-                raw_rows = [dict(zip(columns, row)) for row in cur.fetchall()]
-
-        all_attrs = [r.get("attributes") or {} for r in raw_rows]
-        total_pois = len(raw_rows)
+        # --- Load data from CSV (final data) or fall back to DB ---
+        csv_data = _load_csv_data()
+        if csv_data is not None:
+            all_attrs = csv_data
+            total_pois = len(all_attrs)
+        else:
+            with get_db() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        SELECT attributes, agent_name, submitted_at
+                        FROM survey_submissions
+                        ORDER BY submitted_at
+                    """)
+                    columns = [desc[0] for desc in cur.description]
+                    raw_rows = [dict(zip(columns, row)) for row in cur.fetchall()]
+            all_attrs = [r.get("attributes") or {} for r in raw_rows]
+            total_pois = len(all_attrs)
         esc = _esc
 
         # --- Attachment details ---
@@ -811,7 +1012,9 @@ def client_report():
 
         # --- Distributions ---
         agent_dist = _distribution(all_attrs, "agent_name")
-        category_dist = _distribution(all_attrs, "category", CATEGORY_LABELS)
+        # Map raw CSV categories to grouped report categories
+        category_dist = _distribution(all_attrs, "category",
+                                      {**CATEGORY_LABELS, **CSV_CATEGORY_MAP})
         subcategory_dist = _distribution(all_attrs, "secondary_category")
         status_dist = _distribution(all_attrs, "company_status", STATUS_LABELS)
 
@@ -896,11 +1099,19 @@ def client_report():
         notes_count = _count_attr(all_attrs, "general_notes")
 
         # --- Date range ---
-        dates = [r.get("submitted_at") for r in raw_rows if r.get("submitted_at")]
         date_range = ""
-        if dates:
-            date_range = (f"{min(dates).strftime('%b %d, %Y')} - "
-                          f"{max(dates).strftime('%b %d, %Y')}")
+        if csv_data is not None:
+            # CSV data: use survey_date field if available
+            survey_dates = [a.get("survey_date") for a in all_attrs
+                            if a.get("survey_date")]
+            if survey_dates:
+                date_range = f"{min(survey_dates)} - {max(survey_dates)}"
+        else:
+            dates = [r.get("submitted_at") for r in raw_rows
+                     if r.get("submitted_at")]
+            if dates:
+                date_range = (f"{min(dates).strftime('%b %d, %Y')} - "
+                              f"{max(dates).strftime('%b %d, %Y')}")
 
         # --- Data quality ---
         quality_fields = [
@@ -909,7 +1120,7 @@ def client_report():
             ("Status", "company_status"), ("Phone Number", "phone_number"),
             ("Website", "website"), ("Working Days", "working_days"),
             ("Working Hours", "working_hours_each_day"),
-            ("Identity Verified", "identity_correct"),
+            ("Social Media", "social_media"),
         ]
         quality_data = []
         total_filled = 0
